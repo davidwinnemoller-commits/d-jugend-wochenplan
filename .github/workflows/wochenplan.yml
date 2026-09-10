@@ -1,9 +1,9 @@
 name: D-Jugend Wochenplaner
 
 on:
-  # Jeden Freitag um 07:00 UTC (08:00 bzw. 09:00 Uhr deutsche Zeit)
+  # Jeden Freitag um 06:00 UTC (07:00 bzw. 08:00 Uhr deutsche Zeit)
   schedule:
-    - cron: '0 7 * * 5'
+    - cron: '0 6 * * 5'
 
   # Ermöglicht manuelles Starten per Klick in GitHub ("Run workflow")
   workflow_dispatch:
@@ -20,19 +20,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
-      - name: Abhängigkeiten installieren
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Wochenplan erstellen & per WhatsApp senden
+      - name: Wochenplan erstellen & Benachrichtigung senden
         env:
-          FUSSBALL_ICAL_URL: ${{ secrets.FUSSBALL_ICAL_URL }}
-          CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
-          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
-          MY_TEAM_NAME: ${{ secrets.MY_TEAM_NAME }}
+          FUSSBALL_URL_OR_ID: ${{ secrets.FUSSBALL_URL_OR_ID || 'https://www.fussball.de/ajax.team.matchplan/-/mode/PAGE/team-id/0200HNN2LG000000VS548984VSUCHKOE' }}
+          MY_TEAM_NAME: ${{ secrets.MY_TEAM_NAME || 'JSG Hörstel' }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TRAINING_MONTAG_TIME: ${{ secrets.TRAINING_MONTAG_TIME || '17:30 – 19:00 Uhr' }}
           TRAINING_MITTWOCH_TIME: ${{ secrets.TRAINING_MITTWOCH_TIME || '17:30 – 19:00 Uhr' }}
           TREFFPUNKT_OFFSET_MINUTES: ${{ secrets.TREFFPUNKT_OFFSET_MINUTES || '45' }}

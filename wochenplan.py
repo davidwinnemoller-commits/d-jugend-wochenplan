@@ -1,31 +1,48 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Wochenplan-Ersteller für D-Jugend Trainer
-Liest den iCal-Kalender von fussball.de aus und versendet
-freitags automatisch die WhatsApp-Nachricht via CallMeBot.
+Wochenplan-Ersteller für D-Jugend Trainer (JSG Hörstel / Dreierwalde II)
+Reines Python 3 (Standardbibliothek - keine externen Abhängigkeiten erforderlich).
+Liest die Spieldaten von fussball.de aus und sendet die fertige Nachricht
+freitags automatisch auf dein Smartphone (z. B. via ntfy Push oder Telegram).
 """
 
 import os
 import sys
+import re
 import datetime
 import urllib.parse
-import requests
-from icalendar import Calendar
-from dateutil import tz
+import urllib.request
+import json
 
-# Standard-Konfigurationen (können über Umgebungsvariablen / Secrets angepasst werden)
-FUSSBALL_ICAL_URL = os.getenv("FUSSBALL_ICAL_URL", "").strip()
-CALLMEBOT_PHONE = os.getenv("CALLMEBOT_PHONE", "").strip()
-CALLMEBOT_APIKEY = os.getenv("CALLMEBOT_APIKEY", "").strip()
-MY_TEAM_NAME = os.getenv("MY_TEAM_NAME", "").strip()
+# UTF-8 Ausgabe für Windows-Konsolen sicherstellen
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
+# ==========================================
+# KONFIGURATION (über Secrets / Umgebungsvariablen)
+# ==========================================
+# Dein Team-Link oder die Team-ID von fussball.de
+FUSSBALL_URL_OR_ID = os.getenv(
+    "FUSSBALL_URL_OR_ID", 
+    "https://www.fussball.de/ajax.team.matchplan/-/mode/PAGE/team-id/0200HNN2LG000000VS548984VSUCHKOE"
+).strip()
+
+# Eigener Vereinsname (für Erkennung von Heim- vs. Auswärtsspiel)
+MY_TEAM_NAME = os.getenv("MY_TEAM_NAME", "JSG Hörstel").strip()
+
+# ntfy.sh Topic für kostenlose Push-Benachrichtigungen aufs Handy
+# Wähle ein eigenes, geheimes Thema (z. B. d-jugend-hoerstel-trainer-xyz123)
+NTFY_TOPIC = os.getenv("NTFY_TOPIC", "").strip()
+
+# Telegram (optional, falls Telegram genutzt werden soll)
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+# Trainingszeiten
 TRAINING_MO_TIME = os.getenv("TRAINING_MONTAG_TIME", "17:30 – 19:00 Uhr").strip()
 TRAINING_MI_TIME = os.getenv("TRAINING_MITTWOCH_TIME", "17:30 – 19:00 Uhr").strip()
 TREFFPUNKT_MINUTEN = int(os.getenv("TREFFPUNKT_OFFSET_MINUTES", "45"))
-
-# Lokale Zeitzone Deutschland
-LOCAL_TZ = tz.gettz("Europe/Berlin")
 
 DAYS_DE = {
     0: "Montag",
@@ -44,10 +61,8 @@ def get_target_week_range(ref_date: datetime.date = None):
     Wenn das Skript freitags ausgeführt wird, ist der nächste Montag in 3 Tagen.
     """
     if ref_date is None:
-        ref_date = datetime.datetime.now(LOCAL_TZ).date()
+        ref_date = datetime.date.today()
 
-    # Nächsten Montag berechnen:
-    # 0 = Mo, 4 = Fr
     days_until_next_monday = (7 - ref_date.weekday()) % 7
     if days_until_next_monday == 0:
         days_until_next_monday = 7  # Wenn heute Montag ist, nimm nächsten Montag
@@ -58,85 +73,91 @@ def get_target_week_range(ref_date: datetime.date = None):
     return next_monday, next_sunday
 
 
-def fetch_and_parse_events(ical_url: str):
-    """Lädt die .ics Datei von fussball.de und parst alle Termine."""
+def extract_team_id(url_or_id: str) -> str:
+    """Extrahiert die team-id aus einer URL oder gibt die ID direkt zurück."""
+    m = re.search(r'team-id/([A-Za-z0-9]+)', url_or_id)
+    if m:
+        return m.group(1)
+    if re.match(r'^[A-Za-z0-9]{20,}$', url_or_id):
+        return url_or_id
+    return ""
+
+
+def fetch_matches_from_fussball_de(url_or_id: str):
+    """
+    Lädt den Spielplan mit Spielstätten über den fussball.de JSON-Endpoint.
+    """
+    team_id = extract_team_id(url_or_id)
+    if not team_id:
+        raise ValueError(f"Konnte keine gültige Team-ID finden in: {url_or_id}")
+
+    endpoint = (
+        f"https://www.fussball.de/ajax.team.matchplan/-/mime-type/JSON/mode/PAGE/"
+        f"prev-season-allowed/false/show-filter/false/show-venues/true/team-id/{team_id}"
+    )
+
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*"
     }
-    response = requests.get(ical_url, headers=headers, timeout=20)
-    response.raise_for_status()
 
-    cal = Calendar.from_ical(response.content)
-    events = []
+    req = urllib.request.Request(endpoint, headers=headers)
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        content = resp.read().decode("utf-8")
 
-    for component in cal.walk():
-        if component.name == "VEVENT":
-            dtstart = component.get("dtstart").dt
-            
-            # Zeitzone sicherstellen
-            if isinstance(dtstart, datetime.datetime):
-                if dtstart.tzinfo is None:
-                    dtstart = dtstart.replace(tzinfo=LOCAL_TZ)
-                else:
-                    dtstart = dtstart.astimezone(LOCAL_TZ)
-            elif isinstance(dtstart, datetime.date):
-                dtstart = datetime.datetime.combine(dtstart, datetime.time(0, 0), tzinfo=LOCAL_TZ)
+    data = json.loads(content)
+    raw_html = data.get("html", "")
+    if not raw_html:
+        return []
 
-            summary = str(component.get("summary", "")).strip()
-            location = str(component.get("location", "")).strip()
-            description = str(component.get("description", "")).strip()
+    # Blöcke nach 'row-headline visible-small' aufteilen
+    blocks = re.split(r'<tr class="row-headline visible-small">', raw_html)
+    matches = []
 
-            events.append({
-                "start": dtstart,
-                "summary": summary,
-                "location": location,
-                "description": description
+    for block in blocks[1:]:
+        headline_m = re.search(r'<td[^>]*>(.*?)</td>', block)
+        headline = headline_m.group(1).strip() if headline_m else ""
+
+        # Clubs auslesen
+        clubs = re.findall(r'<div class="club-name">\s*(.*?)\s*</div>', block, re.DOTALL)
+        clean_clubs = [re.sub(r'&#\d+;', '', c).strip().replace('/ ', '/') for c in clubs]
+
+        # Venue (Sportplatz mit Adresse)
+        venue_m = re.search(r'row-venue.*?<td colspan="3">\s*(.*?)\s*</td>', block, re.DOTALL)
+        venue = venue_m.group(1).strip() if venue_m else "Wird noch bekanntgegeben"
+        venue = " ".join(venue.split())
+
+        # Datum und Zeit auslesen
+        date_m = re.search(r'(\d{2}\.\d{2}\.\d{4})', headline)
+        time_m = re.search(r'(\d{2}:\d{2})', headline)
+
+        if date_m and time_m:
+            dt_str = f"{date_m.group(1)} {time_m.group(1)}"
+            dt = datetime.datetime.strptime(dt_str, "%d.%m.%Y %H:%M")
+
+            home_team = clean_clubs[0] if len(clean_clubs) > 0 else "Heim"
+            away_team = clean_clubs[1] if len(clean_clubs) > 1 else "Gast"
+
+            matches.append({
+                "start": dt,
+                "headline": headline,
+                "home": home_team,
+                "away": away_team,
+                "venue": venue
             })
 
-    # Sortieren nach Startdatum
-    events.sort(key=lambda x: x["start"])
-    return events
+    matches.sort(key=lambda x: x["start"])
+    return matches
 
 
-def parse_match_details(summary: str, my_team: str):
-    """
-    Versucht Gegner, Heim/Auswärts aus dem Titel zu extrahieren.
-    fussball.de nutzt häufig: 'Heimteam : Gastteam' oder 'Heimteam - Gastteam'
-    """
-    clean_summary = summary
-    # Häufige Präfixe wie 'D-Junioren Kreisklasse: ' entfernen
-    if ":" in clean_summary and ("-" in clean_summary or "vs" in clean_summary or ":" in clean_summary):
-        # Wenn vor dem ersten Doppelpunkt z.B. die Liga steht
-        parts = clean_summary.split(":", 1)
-        if any(w in parts[0].lower() for w in ["junioren", "jugend", "liga", "klasse", "staffel", "pokal"]):
-            clean_summary = parts[1].strip()
-
-    delimiter = " - " if " - " in clean_summary else (" : " if " : " in clean_summary else " vs. ")
-    
-    if delimiter in clean_summary:
-        teams = clean_summary.split(delimiter, 1)
-        team_a = teams[0].strip()
-        team_b = teams[1].strip()
-
-        if my_team:
-            if my_team.lower() in team_a.lower():
-                return {"type": "Heimspiel 🏠", "opponent": team_b, "headline": f"{team_a} vs. {team_b}"}
-            elif my_team.lower() in team_b.lower():
-                return {"type": "Auswärtsspiel 🚗", "opponent": team_a, "headline": f"{team_a} vs. {team_b}"}
-
-        return {"type": "Spiel", "opponent": f"{team_a} vs. {team_b}", "headline": f"{team_a} vs. {team_b}"}
-
-    return {"type": "Spiel", "opponent": clean_summary, "headline": clean_summary}
-
-
-def build_whatsapp_message(target_monday: datetime.date, target_sunday: datetime.date, events: list):
-    """Baut den formatierten Nachrichtentext für die WhatsApp-Gruppe."""
+def build_whatsapp_message(target_monday: datetime.date, target_sunday: datetime.date, matches: list):
+    """Erstellt den fertigen Text für die WhatsApp-Gruppe."""
     target_wednesday = target_monday + datetime.timedelta(days=2)
 
-    # Nach Spielen in dieser Woche suchen (insbesondere Wochenende)
+    # Nach Spielen in dieser Woche suchen
     week_matches = [
-        ev for ev in events
-        if target_monday <= ev["start"].date() <= target_sunday
+        m for m in matches
+        if target_monday <= m["start"].date() <= target_sunday
     ]
 
     mo_str = target_monday.strftime("%d.%m.")
@@ -164,20 +185,30 @@ def build_whatsapp_message(target_monday: datetime.date, target_sunday: datetime
             weekday_name = DAYS_DE.get(m_date.weekday(), "Spieltag")
             kickoff_time = match["start"].strftime("%H:%M")
             date_formatted = match["start"].strftime("%d.%m.%Y")
-            
-            # Treffpunkt berechnen
+
+            # Treffpunkt
             treffpunkt_dt = match["start"] - datetime.timedelta(minutes=TREFFPUNKT_MINUTEN)
             treffpunkt_time = treffpunkt_dt.strftime("%H:%M")
 
-            details = parse_match_details(match["summary"], MY_TEAM_NAME)
-            location = match["location"] or "Wird noch bekanntgegeben"
+            home = match["home"]
+            away = match["away"]
+
+            is_home = MY_TEAM_NAME.lower() in home.lower()
+            is_away = MY_TEAM_NAME.lower() in away.lower()
+
+            if is_home:
+                spiel_typ = "HEIMSPIEL 🏠"
+            elif is_away:
+                spiel_typ = "AUSWÄRTSSPIEL 🚗"
+            else:
+                spiel_typ = "SPIEL"
 
             lines.extend([
-                f"🏆 *{details['type'].upper()} ({weekday_name}):*",
-                f"• *Paarung:* {details['headline']}",
+                f"🏆 *{spiel_typ} ({weekday_name}):*",
+                f"• *Paarung:* {home} vs. {away}",
                 f"• *Anstoß:* {weekday_name}, {date_formatted} um {kickoff_time} Uhr",
                 f"• *Treffpunkt:* {treffpunkt_time} Uhr ({TREFFPUNKT_MINUTEN} Min. vor Anstoß)",
-                f"• *Ort / Platz:* {location}",
+                f"• *Ort / Sportplatz:* {match['venue']}",
                 ""
             ])
 
@@ -190,58 +221,85 @@ def build_whatsapp_message(target_monday: datetime.date, target_sunday: datetime
     return "\n".join(lines)
 
 
-def send_whatsapp_callmebot(phone: str, apikey: str, text: str):
-    """Sendet die Nachricht per CallMeBot WhatsApp API."""
-    base_url = "https://api.callmebot.com/whatsapp.php"
+def send_via_ntfy(topic: str, text: str):
+    """
+    Sendet eine Push-Benachrichtigung über ntfy.sh direkt aufs Smartphone.
+    Mit 1-Klick-Button 'In WhatsApp öffnen'!
+    """
+    url = f"https://ntfy.sh/{topic}"
     encoded_text = urllib.parse.quote(text)
     
-    # CallMeBot verlangt standardmäßig phone, text, apikey
-    url = f"{base_url}?phone={phone}&text={encoded_text}&apikey={apikey}"
-    
-    response = requests.get(url, timeout=30)
-    if response.status_code == 200 and "error" not in response.text.lower():
-        print("✅ WhatsApp-Nachricht erfolgreich via CallMeBot versendet!")
-        return True
-    else:
-        print(f"❌ Fehler beim Versenden via CallMeBot: HTTP {response.status_code}")
-        print(f"Antwort: {response.text}")
+    headers = {
+        "Title": "⚽ D-Jugend Wochenplan".encode("utf-8"),
+        "Tags": "soccer,calendar",
+        # Push-Aktionen: 1) WhatsApp direkt öffnen, 2) Text in Zwischenablage kopieren
+        "Actions": f"view, In WhatsApp öffnen, whatsapp://send?text={encoded_text}; copy, Text kopieren, {text}"
+    }
+
+    req = urllib.request.Request(url, data=text.encode("utf-8"), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            if resp.status == 200:
+                print(f"✅ Push-Benachrichtigung erfolgreich an ntfy-Thema '{topic}' gesendet!")
+                return True
+    except Exception as e:
+        print(f"❌ ntfy Fehler: {e}")
         return False
+    return False
+
+
+def send_via_telegram(bot_token: str, chat_id: str, text: str):
+    """Sendet die Nachricht per Telegram Bot."""
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = json.dumps({
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown"
+    }).encode("utf-8")
+    
+    headers = {"Content-Type": "application/json"}
+    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            if resp.status == 200:
+                print("✅ Nachricht erfolgreich via Telegram gesendet!")
+                return True
+    except Exception as e:
+        print(f"❌ Telegram Fehler: {e}")
+        return False
+    return False
 
 
 def main():
     print("=== D-Jugend Wochenplaner gestartet ===")
 
-    if not FUSSBALL_ICAL_URL:
-        print("❌ FEHLER: Keine FUSSBALL_ICAL_URL konfiguriert!")
-        sys.exit(1)
-
-    # Zielwoche berechnen
     next_monday, next_sunday = get_target_week_range()
     print(f"Ermittle Termine für Zeitraum: {next_monday} bis {next_sunday}")
 
-    # Termine von fussball.de laden
-    print(f"Lade iCal-Kalender von: {FUSSBALL_ICAL_URL[:60]}...")
     try:
-        events = fetch_and_parse_events(FUSSBALL_ICAL_URL)
-        print(f"Erfolgreich {len(events)} Termine im Kalender gefunden.")
+        matches = fetch_matches_from_fussball_de(FUSSBALL_URL_OR_ID)
+        print(f"Erfolgreich {len(matches)} Spiele aus fussball.de geladen.")
     except Exception as e:
-        print(f"❌ Fehler beim Laden/Parsen des Kalenders: {e}")
+        print(f"❌ Fehler beim Laden von fussball.de: {e}")
         sys.exit(1)
 
-    # Text generieren
-    message_text = build_whatsapp_message(next_monday, next_sunday, events)
+    message_text = build_whatsapp_message(next_monday, next_sunday, matches)
     print("\n--- Generierter Nachrichtentext: ---")
     print(message_text)
     print("------------------------------------\n")
 
-    # WhatsApp-Versand via CallMeBot (falls Zugangsdaten vorhanden)
-    if CALLMEBOT_PHONE and CALLMEBOT_APIKEY:
-        print("Sende Nachricht an deine WhatsApp-Nummer...")
-        success = send_whatsapp_callmebot(CALLMEBOT_PHONE, CALLMEBOT_APIKEY, message_text)
-        if not success:
-            sys.exit(1)
-    else:
-        print("ℹ️ Hinweis: CALLMEBOT_PHONE oder CALLMEBOT_APIKEY nicht gesetzt. Nachricht wird nur in der Konsole ausgegeben (Testmodus).")
+    # Versand via ntfy Push
+    if NTFY_TOPIC:
+        print(f"Sende Push an ntfy.sh/{NTFY_TOPIC}...")
+        send_via_ntfy(NTFY_TOPIC, message_text)
+
+    # Versand via Telegram
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        print("Sende Nachricht via Telegram...")
+        send_via_telegram(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, message_text)
+
+    if not NTFY_TOPIC and not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        print("ℹ️ Kein Benachrichtigungskanal (NTFY_TOPIC oder TELEGRAM) gesetzt. Nur Konsolenausgabe.")
 
 
 if __name__ == "__main__":
