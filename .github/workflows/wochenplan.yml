@@ -1,0 +1,40 @@
+name: D-Jugend Wochenplaner
+
+on:
+  # Jeden Freitag um 07:00 UTC (08:00 bzw. 09:00 Uhr deutsche Zeit)
+  schedule:
+    - cron: '0 7 * * 5'
+
+  # Ermöglicht manuelles Starten per Klick in GitHub ("Run workflow")
+  workflow_dispatch:
+
+jobs:
+  build-and-send:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Code auschecken
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Abhängigkeiten installieren
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Wochenplan erstellen & per WhatsApp senden
+        env:
+          FUSSBALL_ICAL_URL: ${{ secrets.FUSSBALL_ICAL_URL }}
+          CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+          MY_TEAM_NAME: ${{ secrets.MY_TEAM_NAME }}
+          TRAINING_MONTAG_TIME: ${{ secrets.TRAINING_MONTAG_TIME || '17:30 – 19:00 Uhr' }}
+          TRAINING_MITTWOCH_TIME: ${{ secrets.TRAINING_MITTWOCH_TIME || '17:30 – 19:00 Uhr' }}
+          TREFFPUNKT_OFFSET_MINUTES: ${{ secrets.TREFFPUNKT_OFFSET_MINUTES || '45' }}
+        run: |
+          python wochenplan.py
