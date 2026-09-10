@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 Wochenplan-Ersteller für D-Jugend Trainer (JSG Hörstel / Dreierwalde II)
-Reines Python 3 (Standardbibliothek - keine externen Abhängigkeiten).
+Reines Python 3 (Standardbibliothek - keine externen Abhängigkeiten erforderlich).
+Liest die Spieldaten von fussball.de aus und sendet die fertige Nachricht
+freitags automatisch auf dein Smartphone (via ntfy Push oder Telegram).
 """
 
 import os
@@ -12,7 +14,6 @@ import datetime
 import urllib.parse
 import urllib.request
 import json
-import random
 
 # UTF-8 Ausgabe für Windows-Konsolen sicherstellen
 if hasattr(sys.stdout, "reconfigure"):
@@ -31,10 +32,10 @@ NTFY_TOPIC = os.getenv("NTFY_TOPIC", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-# Treffpunkt vor dem Spiel (in Minuten)
+# Treffpunkt vor dem Spiel (in Minuten) - immer 45 Minuten vor Anstoß
 TREFFPUNKT_MINUTEN = int(os.getenv("TREFFPUNKT_OFFSET_MINUTES", "45"))
 
-# Ob der Text wöchentlich leicht variieren soll (true/false)
+# Automatische Wort- und Phrasen-Rotation (standardmäßig AKTIVIERT)
 VARIATION_MODE = os.getenv("VARIATION_MODE", "true").lower() in ("true", "1", "yes")
 
 DAYS_DE = {
@@ -167,10 +168,9 @@ def fetch_matches_from_fussball_de(url_or_id: str):
     return matches
 
 
-def build_message(target_monday: datetime.date, target_sunday: datetime.date, matches: list, vary: bool = False):
+def build_message(target_monday: datetime.date, target_sunday: datetime.date, matches: list, vary: bool = True):
     """
-    Erstellt die Nachricht nach der gewünschten Vorlage.
-    Unterstützt optional leichte Variationen pro Kalenderwoche.
+    Erstellt die Nachricht mit vermerktem Anstoß und automatischer Phrasen-Rotation.
     """
     week_matches = [
         m for m in matches
@@ -185,7 +185,7 @@ def build_message(target_monday: datetime.date, target_sunday: datetime.date, ma
             spielfrei_pool = [
                 "Moin zusammen, nächste Woche haben wir spielfrei! Wir sehen uns Montag und Mittwoch ganz normal beim Training. Schönes Wochenende ⚽",
                 "Hallo zusammen, am kommenden Wochenende steht kein Spiel an (spielfrei). Bitte trotzdem für die Trainings abstimmen! Schönes Wochenende 👋",
-                "Moin Moin, nächstes Wochenende haben wir spielfrei und können durchschnaufen! Montag & Mittwoch ist wie gewohnt Training. Schönes Wochenende!"
+                "Moin Moin ins Team, nächstes Wochenende haben wir spielfrei! Montag & Mittwoch ist wie gewohnt Training. Schönes Wochenende! ⚽"
             ]
             return spielfrei_pool[kw % len(spielfrei_pool)]
         else:
@@ -194,12 +194,12 @@ def build_message(target_monday: datetime.date, target_sunday: datetime.date, ma
     match = week_matches[0]
     dt = match["start"]
     weekday_name = DAYS_DE.get(dt.weekday(), "Samstag")
-    datum_str = dt.strftime("%d.%m.") # Format z. B. (19.09.)
+    datum_str = dt.strftime("%d.%m.") # z. B. (19.09.)
 
-    # Treffpunkt berechnen (45 Min vor Anstoß)
+    # Treffpunkt & Anstoßzeit
+    anstoß_str = f"{dt.strftime('%H:%M')} Uhr"
     treffpunkt_dt = dt - datetime.timedelta(minutes=TREFFPUNKT_MINUTEN)
     treffpunkt_str = f"{treffpunkt_dt.strftime('%H:%M')} Uhr"
-    anstoß_str = f"{dt.strftime('%H:%M')} Uhr"
 
     # Heim oder Auswärts
     is_home = MY_TEAM_NAME.lower() in match["home"].lower()
@@ -208,59 +208,60 @@ def build_message(target_monday: datetime.date, target_sunday: datetime.date, ma
     spielort = venue["ort"]
     adresse = venue["adresse"]
 
-    # 1. EXAKTER STANDARD-MODUS (Wie vom Trainer gewünscht)
     if not vary:
+        # Fester statischer Text (mit Anstoß vermerkt)
         if is_home:
             return (
                 f"Moin zusammen, nächste Woche {weekday_name} ({datum_str}) haben wir unser nächstes Spiel gegen {gegner} in {spielort}. "
-                f"Dazu treffen wir uns um {treffpunkt_str} in {spielort} am Stadion. "
+                f"Anstoß ist um {anstoß_str}, dazu treffen wir uns um {treffpunkt_str} in {spielort} am Stadion. "
                 f"Gerne einmal abstimmen wer dabei ist auch für die Trainings!\n"
                 f"Schönes Wochenende"
             )
         else:
             return (
                 f"Moin zusammen, nächste Woche {weekday_name} ({datum_str}) haben wir unser nächstes Spiel gegen {gegner} in {spielort}. "
-                f"Dazu treffen wir uns um {treffpunkt_str} in {spielort} am Stadion. {adresse}. "
+                f"Anstoß ist um {anstoß_str}, dazu treffen wir uns um {treffpunkt_str} in {spielort} am Stadion. {adresse}. "
                 f"Gerne einmal abstimmen wer dabei ist auch für die Trainings!\n"
                 f"Schönes Wochenende"
             )
 
-    # 2. VARIATIONS-MODUS (Bringt jede Woche automatisch frischen Wind rein)
+    # AUTOMATISCHE ROTATION (Verschiedene Bausteine, jede Woche neu kombiniert)
     begruessungen = [
         "Moin zusammen,",
         "Hallo zusammen,",
         "Moin Moin ins Team,",
         "Hi zusammen,",
-        "Servus zusammen,"
+        "Moin,"
     ]
     einleitungen = [
         f"nächste Woche {weekday_name} ({datum_str}) haben wir unser nächstes Spiel gegen {gegner} in {spielort}.",
-        f"am kommenden {weekday_name} ({datum_str}) steht unser nächstes Match an: Es geht gegen {gegner} in {spielort}.",
-        f"nächste Woche {weekday_name} ({datum_str}) wartet die nächste Herausforderung auf uns gegen {gegner} in {spielort}.",
-        f"am {weekday_name} ({datum_str}) geht es wieder rund! Wir spielen gegen {gegner} in {spielort}."
+        f"am kommenden {weekday_name} ({datum_str}) steht unser nächstes Spiel gegen {gegner} in {spielort} an.",
+        f"am {weekday_name} ({datum_str}) geht es wieder rund! Wir spielen gegen {gegner} in {spielort}.",
+        f"nächste Woche {weekday_name} ({datum_str}) wartet das nächste Match auf uns gegen {gegner} in {spielort}."
     ]
     treff_bausteine = [
-        f"Dazu treffen wir uns um {treffpunkt_str} in {spielort} am Stadion (Anstoß: {anstoß_str}).",
-        f"Treffpunkt ist um {treffpunkt_str} in {spielort} am Stadion (Anpfiff ist um {anstoß_str}).",
-        f"Wir treffen uns um {treffpunkt_str} in {spielort} direkt am Stadion (Anstoß: {anstoß_str})."
+        f"Anstoß ist um {anstoß_str}, dazu treffen wir uns um {treffpunkt_str} in {spielort} am Stadion.",
+        f"Anpfiff ist um {anstoß_str} – Treffpunkt ist um {treffpunkt_str} in {spielort} direkt am Stadion.",
+        f"Das Spiel beginnt um {anstoß_str}. Wir treffen uns um {treffpunkt_str} in {spielort} am Stadion.",
+        f"Anstoß ist um {anstoß_str}, Treffpunkt ist um {treffpunkt_str} in {spielort} am Stadion."
     ]
     abstimm_bausteine = [
         "Gerne einmal abstimmen wer dabei ist auch für die Trainings!",
-        "Bitte stimmt kurz ab, wer beim Spiel und beim Training dabei ist!",
+        "Bitte stimmt zeitnah ab, wer beim Spiel und bei den Trainings dabei ist!",
         "Gebt bitte kurz Rückmeldung, wer am Wochenende und beim Training dabei sein kann!",
-        "Tragt euch bitte zeitnah für das Spiel und die Trainingseinheiten ein!"
+        "Tragt euch bitte kurz ein, wer für das Spiel und die Trainings dabei ist!"
     ]
     gruesse = [
         "Schönes Wochenende ⚽",
         "Euch allen ein schönes Wochenende! 👍",
-        "Schönes Wochenende und bis Montag auf dem Platz! 👋",
-        "Habt ein schönes Wochenende! ⚽"
+        "Schönes Wochenende und bis Montag! 👋",
+        "Habt ein erholsames Wochenende! ⚽"
     ]
 
     begr = begruessungen[kw % len(begruessungen)]
     einl = einleitungen[(kw + 1) % len(einleitungen)]
-    treff = treff_bausteine[kw % len(treff_bausteine)]
-    abst = abstimm_bausteine[(kw + 2) % len(abstimm_bausteine)]
+    treff = treff_bausteine[(kw + 2) % len(treff_bausteine)]
+    abst = abstimm_bausteine[(kw + 3) % len(abstimm_bausteine)]
     schluss = gruesse[kw % len(gruesse)]
 
     if is_home:
