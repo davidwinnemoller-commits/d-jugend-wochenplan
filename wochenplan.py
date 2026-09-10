@@ -271,25 +271,47 @@ def build_message(target_monday: datetime.date, target_sunday: datetime.date, ma
 
 
 def send_via_ntfy(topic: str, text: str):
-    """Sendet Push-Benachrichtigung via ntfy.sh mit WhatsApp-Button."""
-    url = f"https://ntfy.sh/{topic}"
+    """Sendet Push-Benachrichtigung via ntfy.sh mit WhatsApp- und Kopier-Button."""
+    url = "https://ntfy.sh"
     encoded_text = urllib.parse.quote(text)
-    
-    headers = {
-        "Title": "⚽ D-Jugend Wochenplan".encode("utf-8"),
-        "Tags": "soccer,calendar",
-        "Actions": f"view, In WhatsApp öffnen, whatsapp://send?text={encoded_text}; copy, Text kopieren, {text}"
+
+    payload = {
+        "topic": topic,
+        "title": "⚽ D-Jugend Wochenplan",
+        "message": text,
+        "tags": ["soccer", "calendar"],
+        "actions": [
+            {
+                "action": "view",
+                "label": "In WhatsApp öffnen",
+                "url": f"whatsapp://send?text={encoded_text}"
+            },
+            {
+                "action": "copy",
+                "label": "Text kopieren",
+                "value": text
+            }
+        ]
     }
 
-    req = urllib.request.Request(url, data=text.encode("utf-8"), headers=headers, method="POST")
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST"
+    )
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             if resp.status == 200:
                 print(f"✅ Push-Benachrichtigung erfolgreich an ntfy-Thema '{topic}' gesendet!")
                 return True
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+        print(f"❌ ntfy HTTP Fehler {e.code}: {error_body}")
+        raise
     except Exception as e:
         print(f"❌ ntfy Fehler: {e}")
-        return False
+        raise
     return False
 
 
