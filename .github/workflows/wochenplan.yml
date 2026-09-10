@@ -28,8 +28,7 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TRAINING_MONTAG_TIME: ${{ secrets.TRAINING_MONTAG_TIME || '17:30 – 19:00 Uhr' }}
-          TRAINING_MITTWOCH_TIME: ${{ secrets.TRAINING_MITTWOCH_TIME || '17:30 – 19:00 Uhr' }}
           TREFFPUNKT_OFFSET_MINUTES: ${{ secrets.TREFFPUNKT_OFFSET_MINUTES || '45' }}
+          VARIATION_MODE: ${{ secrets.VARIATION_MODE || 'false' }}
         run: |
           python wochenplan.py

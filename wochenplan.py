@@ -2,9 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Wochenplan-Ersteller für D-Jugend Trainer (JSG Hörstel / Dreierwalde II)
-Reines Python 3 (Standardbibliothek - keine externen Abhängigkeiten erforderlich).
-Liest die Spieldaten von fussball.de aus und sendet die fertige Nachricht
-freitags automatisch auf dein Smartphone (z. B. via ntfy Push oder Telegram).
+Reines Python 3 (Standardbibliothek - keine externen Abhängigkeiten).
 """
 
 import os
@@ -14,35 +12,30 @@ import datetime
 import urllib.parse
 import urllib.request
 import json
+import random
 
 # UTF-8 Ausgabe für Windows-Konsolen sicherstellen
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 # ==========================================
-# KONFIGURATION (über Secrets / Umgebungsvariablen)
+# KONFIGURATION
 # ==========================================
-# Dein Team-Link oder die Team-ID von fussball.de
 FUSSBALL_URL_OR_ID = os.getenv(
     "FUSSBALL_URL_OR_ID", 
     "https://www.fussball.de/ajax.team.matchplan/-/mode/PAGE/team-id/0200HNN2LG000000VS548984VSUCHKOE"
 ).strip()
 
-# Eigener Vereinsname (für Erkennung von Heim- vs. Auswärtsspiel)
 MY_TEAM_NAME = os.getenv("MY_TEAM_NAME", "JSG Hörstel").strip()
-
-# ntfy.sh Topic für kostenlose Push-Benachrichtigungen aufs Handy
-# Wähle ein eigenes, geheimes Thema (z. B. d-jugend-hoerstel-trainer-xyz123)
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "").strip()
-
-# Telegram (optional, falls Telegram genutzt werden soll)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-# Trainingszeiten
-TRAINING_MO_TIME = os.getenv("TRAINING_MONTAG_TIME", "17:30 – 19:00 Uhr").strip()
-TRAINING_MI_TIME = os.getenv("TRAINING_MITTWOCH_TIME", "17:30 – 19:00 Uhr").strip()
+# Treffpunkt vor dem Spiel (in Minuten)
 TREFFPUNKT_MINUTEN = int(os.getenv("TREFFPUNKT_OFFSET_MINUTES", "45"))
+
+# Ob der Text wöchentlich leicht variieren soll (true/false)
+VARIATION_MODE = os.getenv("VARIATION_MODE", "true").lower() in ("true", "1", "yes")
 
 DAYS_DE = {
     0: "Montag",
@@ -56,20 +49,16 @@ DAYS_DE = {
 
 
 def get_target_week_range(ref_date: datetime.date = None):
-    """
-    Ermittelt den Zeitraum der nächsten Spielwoche (Montag bis Sonntag).
-    Wenn das Skript freitags ausgeführt wird, ist der nächste Montag in 3 Tagen.
-    """
+    """Ermittelt Montag bis Sonntag der kommenden Spielwoche."""
     if ref_date is None:
         ref_date = datetime.date.today()
 
     days_until_next_monday = (7 - ref_date.weekday()) % 7
     if days_until_next_monday == 0:
-        days_until_next_monday = 7  # Wenn heute Montag ist, nimm nächsten Montag
+        days_until_next_monday = 7
 
     next_monday = ref_date + datetime.timedelta(days=days_until_next_monday)
     next_sunday = next_monday + datetime.timedelta(days=6)
-
     return next_monday, next_sunday
 
 
@@ -83,10 +72,41 @@ def extract_team_id(url_or_id: str) -> str:
     return ""
 
 
+def parse_venue_details(venue_raw: str):
+    """
+    Teilt die fussball.de Spielstätte sauber in:
+    - ort (z. B. Hörstel, Ibbenbüren)
+    - adresse (z. B. Jahnstr. 21, 49479 Ibbenbüren)
+    - stadion_name (z. B. Carl-Keller-Stadion Platz 2)
+    """
+    if not venue_raw or venue_raw == "Wird noch bekanntgegeben":
+        return {
+            "ort": "Wird noch bekanntgegeben",
+            "adresse": "",
+            "stadion": "am Sportplatz"
+        }
+
+    parts = [p.strip() for p in venue_raw.split(',') if p.strip()]
+
+    # Ort meist im letzten Teil (z. B. '49479 Ibbenbüren' -> 'Ibbenbüren')
+    ort = parts[-1]
+    ort = re.sub(r'^\d{5}\s*', '', ort).strip()
+
+    # Stadion / Platzname meist im 2. Teil
+    stadion = parts[1] if len(parts) >= 2 else "am Stadion"
+
+    # Adresse (Straße + PLZ/Ort)
+    adresse = ", ".join(parts[2:]) if len(parts) >= 3 else venue_raw
+
+    return {
+        "ort": ort,
+        "adresse": adresse,
+        "stadion": stadion
+    }
+
+
 def fetch_matches_from_fussball_de(url_or_id: str):
-    """
-    Lädt den Spielplan mit Spielstätten über den fussball.de JSON-Endpoint.
-    """
+    """Lädt den Spielplan mit Spielstätten über den fussball.de JSON-Endpoint."""
     team_id = extract_team_id(url_or_id)
     if not team_id:
         raise ValueError(f"Konnte keine gültige Team-ID finden in: {url_or_id}")
@@ -110,7 +130,6 @@ def fetch_matches_from_fussball_de(url_or_id: str):
     if not raw_html:
         return []
 
-    # Blöcke nach 'row-headline visible-small' aufteilen
     blocks = re.split(r'<tr class="row-headline visible-small">', raw_html)
     matches = []
 
@@ -118,16 +137,13 @@ def fetch_matches_from_fussball_de(url_or_id: str):
         headline_m = re.search(r'<td[^>]*>(.*?)</td>', block)
         headline = headline_m.group(1).strip() if headline_m else ""
 
-        # Clubs auslesen
         clubs = re.findall(r'<div class="club-name">\s*(.*?)\s*</div>', block, re.DOTALL)
         clean_clubs = [re.sub(r'&#\d+;', '', c).strip().replace('/ ', '/') for c in clubs]
 
-        # Venue (Sportplatz mit Adresse)
         venue_m = re.search(r'row-venue.*?<td colspan="3">\s*(.*?)\s*</td>', block, re.DOTALL)
         venue = venue_m.group(1).strip() if venue_m else "Wird noch bekanntgegeben"
         venue = " ".join(venue.split())
 
-        # Datum und Zeit auslesen
         date_m = re.search(r'(\d{2}\.\d{2}\.\d{4})', headline)
         time_m = re.search(r'(\d{2}:\d{2})', headline)
 
@@ -143,96 +159,124 @@ def fetch_matches_from_fussball_de(url_or_id: str):
                 "headline": headline,
                 "home": home_team,
                 "away": away_team,
-                "venue": venue
+                "venue_raw": venue,
+                "venue_info": parse_venue_details(venue)
             })
 
     matches.sort(key=lambda x: x["start"])
     return matches
 
 
-def build_whatsapp_message(target_monday: datetime.date, target_sunday: datetime.date, matches: list):
-    """Erstellt den fertigen Text für die WhatsApp-Gruppe."""
-    target_wednesday = target_monday + datetime.timedelta(days=2)
-
-    # Nach Spielen in dieser Woche suchen
+def build_message(target_monday: datetime.date, target_sunday: datetime.date, matches: list, vary: bool = False):
+    """
+    Erstellt die Nachricht nach der gewünschten Vorlage.
+    Unterstützt optional leichte Variationen pro Kalenderwoche.
+    """
     week_matches = [
         m for m in matches
         if target_monday <= m["start"].date() <= target_sunday
     ]
 
-    mo_str = target_monday.strftime("%d.%m.")
-    mi_str = target_wednesday.strftime("%d.%m.")
-
-    lines = [
-        "⚽ *Wochenplan D-Jugend*",
-        f"Hallo zusammen! Hier ist der Plan für die nächste Woche ({mo_str} – {target_sunday.strftime('%d.%m.')}):",
-        "",
-        "🏃 *TRAINING:*",
-        f"• *Montag ({mo_str}):* {TRAINING_MO_TIME}",
-        f"• *Mittwoch ({mi_str}):* {TRAINING_MI_TIME}",
-        ""
-    ]
+    # Kalenderwoche für deterministische, wöchentliche Abwechslung
+    kw = target_monday.isocalendar()[1]
 
     if not week_matches:
-        lines.extend([
-            "🏆 *SPIEL:*",
-            "• *Spielfrei am Wochenende!* Keine Meisterschaftsbegegnung eingetragen.",
-            ""
-        ])
+        if vary:
+            spielfrei_pool = [
+                "Moin zusammen, nächste Woche haben wir spielfrei! Wir sehen uns Montag und Mittwoch ganz normal beim Training. Schönes Wochenende ⚽",
+                "Hallo zusammen, am kommenden Wochenende steht kein Spiel an (spielfrei). Bitte trotzdem für die Trainings abstimmen! Schönes Wochenende 👋",
+                "Moin Moin, nächstes Wochenende haben wir spielfrei und können durchschnaufen! Montag & Mittwoch ist wie gewohnt Training. Schönes Wochenende!"
+            ]
+            return spielfrei_pool[kw % len(spielfrei_pool)]
+        else:
+            return "Moin zusammen, nächste Woche haben wir spielfrei! Gerne einmal abstimmen wer bei den Trainings dabei ist.\nSchönes Wochenende"
+
+    match = week_matches[0]
+    dt = match["start"]
+    weekday_name = DAYS_DE.get(dt.weekday(), "Samstag")
+    datum_str = dt.strftime("%d.%m.") # Format z. B. (19.09.)
+
+    # Treffpunkt berechnen (45 Min vor Anstoß)
+    treffpunkt_dt = dt - datetime.timedelta(minutes=TREFFPUNKT_MINUTEN)
+    treffpunkt_str = f"{treffpunkt_dt.strftime('%H:%M')} Uhr"
+    anstoß_str = f"{dt.strftime('%H:%M')} Uhr"
+
+    # Heim oder Auswärts
+    is_home = MY_TEAM_NAME.lower() in match["home"].lower()
+    gegner = match["away"] if is_home else match["home"]
+    venue = match["venue_info"]
+    spielort = venue["ort"]
+    adresse = venue["adresse"]
+
+    # 1. EXAKTER STANDARD-MODUS (Wie vom Trainer gewünscht)
+    if not vary:
+        if is_home:
+            return (
+                f"Moin zusammen, nächste Woche {weekday_name} ({datum_str}) haben wir unser nächstes Spiel gegen {gegner} in {spielort}. "
+                f"Dazu treffen wir uns um {treffpunkt_str} in {spielort} am Stadion. "
+                f"Gerne einmal abstimmen wer dabei ist auch für die Trainings!\n"
+                f"Schönes Wochenende"
+            )
+        else:
+            return (
+                f"Moin zusammen, nächste Woche {weekday_name} ({datum_str}) haben wir unser nächstes Spiel gegen {gegner} in {spielort}. "
+                f"Dazu treffen wir uns um {treffpunkt_str} in {spielort} am Stadion. {adresse}. "
+                f"Gerne einmal abstimmen wer dabei ist auch für die Trainings!\n"
+                f"Schönes Wochenende"
+            )
+
+    # 2. VARIATIONS-MODUS (Bringt jede Woche automatisch frischen Wind rein)
+    begruessungen = [
+        "Moin zusammen,",
+        "Hallo zusammen,",
+        "Moin Moin ins Team,",
+        "Hi zusammen,",
+        "Servus zusammen,"
+    ]
+    einleitungen = [
+        f"nächste Woche {weekday_name} ({datum_str}) haben wir unser nächstes Spiel gegen {gegner} in {spielort}.",
+        f"am kommenden {weekday_name} ({datum_str}) steht unser nächstes Match an: Es geht gegen {gegner} in {spielort}.",
+        f"nächste Woche {weekday_name} ({datum_str}) wartet die nächste Herausforderung auf uns gegen {gegner} in {spielort}.",
+        f"am {weekday_name} ({datum_str}) geht es wieder rund! Wir spielen gegen {gegner} in {spielort}."
+    ]
+    treff_bausteine = [
+        f"Dazu treffen wir uns um {treffpunkt_str} in {spielort} am Stadion (Anstoß: {anstoß_str}).",
+        f"Treffpunkt ist um {treffpunkt_str} in {spielort} am Stadion (Anpfiff ist um {anstoß_str}).",
+        f"Wir treffen uns um {treffpunkt_str} in {spielort} direkt am Stadion (Anstoß: {anstoß_str})."
+    ]
+    abstimm_bausteine = [
+        "Gerne einmal abstimmen wer dabei ist auch für die Trainings!",
+        "Bitte stimmt kurz ab, wer beim Spiel und beim Training dabei ist!",
+        "Gebt bitte kurz Rückmeldung, wer am Wochenende und beim Training dabei sein kann!",
+        "Tragt euch bitte zeitnah für das Spiel und die Trainingseinheiten ein!"
+    ]
+    gruesse = [
+        "Schönes Wochenende ⚽",
+        "Euch allen ein schönes Wochenende! 👍",
+        "Schönes Wochenende und bis Montag auf dem Platz! 👋",
+        "Habt ein schönes Wochenende! ⚽"
+    ]
+
+    begr = begruessungen[kw % len(begruessungen)]
+    einl = einleitungen[(kw + 1) % len(einleitungen)]
+    treff = treff_bausteine[kw % len(treff_bausteine)]
+    abst = abstimm_bausteine[(kw + 2) % len(abstimm_bausteine)]
+    schluss = gruesse[kw % len(gruesse)]
+
+    if is_home:
+        return f"{begr} {einl} {treff} {abst}\n{schluss}"
     else:
-        for match in week_matches:
-            m_date = match["start"].date()
-            weekday_name = DAYS_DE.get(m_date.weekday(), "Spieltag")
-            kickoff_time = match["start"].strftime("%H:%M")
-            date_formatted = match["start"].strftime("%d.%m.%Y")
-
-            # Treffpunkt
-            treffpunkt_dt = match["start"] - datetime.timedelta(minutes=TREFFPUNKT_MINUTEN)
-            treffpunkt_time = treffpunkt_dt.strftime("%H:%M")
-
-            home = match["home"]
-            away = match["away"]
-
-            is_home = MY_TEAM_NAME.lower() in home.lower()
-            is_away = MY_TEAM_NAME.lower() in away.lower()
-
-            if is_home:
-                spiel_typ = "HEIMSPIEL 🏠"
-            elif is_away:
-                spiel_typ = "AUSWÄRTSSPIEL 🚗"
-            else:
-                spiel_typ = "SPIEL"
-
-            lines.extend([
-                f"🏆 *{spiel_typ} ({weekday_name}):*",
-                f"• *Paarung:* {home} vs. {away}",
-                f"• *Anstoß:* {weekday_name}, {date_formatted} um {kickoff_time} Uhr",
-                f"• *Treffpunkt:* {treffpunkt_time} Uhr ({TREFFPUNKT_MINUTEN} Min. vor Anstoß)",
-                f"• *Ort / Sportplatz:* {match['venue']}",
-                ""
-            ])
-
-    lines.extend([
-        "👉 *Bitte gebt mir bis Sonntagabend kurz Bescheid, wer an welchen Tagen (Training & Spiel) dabei ist!*",
-        "",
-        "Sportliche Grüße 👋"
-    ])
-
-    return "\n".join(lines)
+        return f"{begr} {einl} {treff} {adresse}. {abst}\n{schluss}"
 
 
 def send_via_ntfy(topic: str, text: str):
-    """
-    Sendet eine Push-Benachrichtigung über ntfy.sh direkt aufs Smartphone.
-    Mit 1-Klick-Button 'In WhatsApp öffnen'!
-    """
+    """Sendet Push-Benachrichtigung via ntfy.sh mit WhatsApp-Button."""
     url = f"https://ntfy.sh/{topic}"
     encoded_text = urllib.parse.quote(text)
     
     headers = {
         "Title": "⚽ D-Jugend Wochenplan".encode("utf-8"),
         "Tags": "soccer,calendar",
-        # Push-Aktionen: 1) WhatsApp direkt öffnen, 2) Text in Zwischenablage kopieren
         "Actions": f"view, In WhatsApp öffnen, whatsapp://send?text={encoded_text}; copy, Text kopieren, {text}"
     }
 
@@ -249,12 +293,11 @@ def send_via_ntfy(topic: str, text: str):
 
 
 def send_via_telegram(bot_token: str, chat_id: str, text: str):
-    """Sendet die Nachricht per Telegram Bot."""
+    """Sendet Nachricht per Telegram."""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = json.dumps({
         "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown"
+        "text": text
     }).encode("utf-8")
     
     headers = {"Content-Type": "application/json"}
@@ -274,7 +317,7 @@ def main():
     print("=== D-Jugend Wochenplaner gestartet ===")
 
     next_monday, next_sunday = get_target_week_range()
-    print(f"Ermittle Termine für Zeitraum: {next_monday} bis {next_sunday}")
+    print(f"Ermittle Spiel für Zeitraum: {next_monday} bis {next_sunday}")
 
     try:
         matches = fetch_matches_from_fussball_de(FUSSBALL_URL_OR_ID)
@@ -283,23 +326,21 @@ def main():
         print(f"❌ Fehler beim Laden von fussball.de: {e}")
         sys.exit(1)
 
-    message_text = build_whatsapp_message(next_monday, next_sunday, matches)
+    message_text = build_message(next_monday, next_sunday, matches, vary=VARIATION_MODE)
     print("\n--- Generierter Nachrichtentext: ---")
     print(message_text)
     print("------------------------------------\n")
 
-    # Versand via ntfy Push
     if NTFY_TOPIC:
         print(f"Sende Push an ntfy.sh/{NTFY_TOPIC}...")
         send_via_ntfy(NTFY_TOPIC, message_text)
 
-    # Versand via Telegram
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         print("Sende Nachricht via Telegram...")
         send_via_telegram(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, message_text)
 
     if not NTFY_TOPIC and not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
-        print("ℹ️ Kein Benachrichtigungskanal (NTFY_TOPIC oder TELEGRAM) gesetzt. Nur Konsolenausgabe.")
+        print("ℹ️ Kein Kanal (NTFY_TOPIC) gesetzt. Nur Konsolenausgabe.")
 
 
 if __name__ == "__main__":
